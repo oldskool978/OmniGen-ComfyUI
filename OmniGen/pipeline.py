@@ -21,8 +21,7 @@ from safetensors.torch import load_file
 
 from OmniGen import OmniGen, OmniGenProcessor, OmniGenScheduler
 
-
-logger = logging.get_logger(__name__) 
+logger = logging.get_logger(__name__)
 
 EXAMPLE_DOC_STRING = """
     Examples:
@@ -41,8 +40,33 @@ EXAMPLE_DOC_STRING = """
         ```
 """
 
+def pad_to_multiple_of_16(dimension):
+    """
+    Pads a dimension to the next multiple of 16.
+    
+    Args:
+        dimension (int): Input dimension
+        
+    Returns:
+        int: Next multiple of 16
+    """
+    if dimension % 16 == 0:
+        return dimension
+    return ((dimension // 16) + 1) * 16
 
-90
+def get_image_dimensions(image_path):
+    """
+    Gets the dimensions of an image file.
+    
+    Args:
+        image_path (str): Path to the image file
+        
+    Returns:
+        tuple: (height, width) of the image
+    """
+    with Image.open(image_path) as img:
+        return img.size[1], img.size[0]  # PIL returns (width, height)
+
 class OmniGenPipeline:
     def __init__(
         self,
@@ -95,7 +119,6 @@ class OmniGenPipeline:
     def merge_lora(self, lora_path: str):
         model = PeftModel.from_pretrained(self.model, lora_path)
         model.merge_and_unload()
-
         self.model = model
     
     def to(self, device: Union[str, torch.device]):
@@ -192,34 +215,57 @@ class OmniGenPipeline:
         Returns:
             A list with the generated images.
         """
-        # check inputs:
-        if use_input_image_size_as_output:
-            assert isinstance(prompt, str) and len(input_images) == 1, "if you want to make sure the output image have the same size as the input image, please only input one image instead of multiple input images"
-        else:
-            assert height%16 == 0 and width%16 == 0, "The height and width must be a multiple of 16."
-        if input_images is None:
-            use_img_guidance = False
+        # Validate and normalize inputs
         if isinstance(prompt, str):
             prompt = [prompt]
             input_images = [input_images] if input_images is not None else None
-        
+            
+        # Handle use_input_image_size_as_output
+        if use_input_image_size_as_output:
+            assert isinstance(prompt, str) or len(prompt) == 1, "Can only use one prompt when matching input image size"
+            assert input_images is not None and len(input_images[0]) >= 1, "Need at least one input image to match size"
+            
+            # Get dimensions from the first input image
+            orig_height, orig_width = get_image_dimensions(input_images[0][0])
+            height = pad_to_multiple_of_16(orig_height)
+            width = pad_to_multiple_of_16(orig_width)
+            
+            if height != orig_height or width != orig_width:
+                logger.info(f"Input image dimensions ({orig_height}, {orig_width}) padded to ({height}, {width}) to ensure multiples of 16")
+        else:
+            # Handle regular height/width padding
+            orig_height, orig_width = height, width
+            height = pad_to_multiple_of_16(height)
+            width = pad_to_multiple_of_16(width)
+            
+            if height != orig_height or width != orig_width:
+                logger.info(f"Requested dimensions ({orig_height}, {orig_width}) padded to ({height}, {width}) to ensure multiples of 16")
+
+        if input_images is None:
+            use_img_guidance = False
+
         # set model and processor
         if max_input_image_size != self.processor.max_image_size:
             self.processor = OmniGenProcessor(self.processor.text_tokenizer, max_image_size=max_input_image_size)
+            
         if offload_model:
             self.enable_model_cpu_offload()
         else:
             self.disable_model_cpu_offload()
 
-        input_data = self.processor(prompt, input_images, height=height, width=width, use_img_cfg=use_img_guidance, separate_cfg_input=separate_cfg_infer, use_input_image_size_as_output=use_input_image_size_as_output)
+        input_data = self.processor(
+            prompt, 
+            input_images, 
+            height=height, 
+            width=width, 
+            use_img_cfg=use_img_guidance, 
+            separate_cfg_input=separate_cfg_infer, 
+            use_input_image_size_as_output=use_input_image_size_as_output
+        )
 
         num_prompt = len(prompt)
         num_cfg = 2 if use_img_guidance else 1
-        if use_input_image_size_as_output:
-            if separate_cfg_infer:
-                height, width = input_data['input_pixel_values'][0][0].shape[-2:]
-            else:
-                height, width = input_data['input_pixel_values'][0].shape[-2:]
+        
         latent_size_h, latent_size_w = height//8, width//8
 
         if seed is not None:
@@ -229,7 +275,9 @@ class OmniGenPipeline:
         latents = torch.randn(num_prompt, 4, latent_size_h, latent_size_w, device=self.device, generator=generator)
         latents = torch.cat([latents]*(1+num_cfg), 0).to(dtype)
 
-        if input_images is not None and self.model_cpu_offload: self.vae.to(self.device)
+        if input_images is not None and self.model_cpu_offload: 
+            self.vae.to(self.device)
+            
         input_img_latents = []
         if separate_cfg_infer:
             for temp_pixel_values in input_data['input_pixel_values']:
@@ -242,12 +290,14 @@ class OmniGenPipeline:
             for img in input_data['input_pixel_values']:
                 img = self.vae_encode(img.to(self.device), dtype)
                 input_img_latents.append(img)
+                
         if input_images is not None and self.model_cpu_offload:
             self.vae.to('cpu')
-            torch.cuda.empty_cache()  # Clear VRAM
-            gc.collect()  # Run garbage collection to free system RAM
+            torch.cuda.empty_cache()
+            gc.collect()
 
-        model_kwargs = dict(input_ids=self.move_to_device(input_data['input_ids']), 
+        model_kwargs = dict(
+            input_ids=self.move_to_device(input_data['input_ids']), 
             input_img_latents=input_img_latents, 
             input_image_sizes=input_data['input_image_sizes'], 
             attention_mask=self.move_to_device(input_data["attention_mask"]), 
@@ -257,7 +307,7 @@ class OmniGenPipeline:
             use_img_cfg=use_img_guidance,
             use_kv_cache=use_kv_cache,
             offload_model=offload_model,
-            )
+        )
         
         if separate_cfg_infer:
             func = self.model.forward_with_separate_cfg
@@ -273,8 +323,6 @@ class OmniGenPipeline:
                     param.data = param.data.to(self.device)
             for buffer_name, buffer in self.model.named_buffers():
                 setattr(self.model, buffer_name, buffer.to(self.device))
-        # else:
-        #     self.model.to(self.device)
 
         scheduler = OmniGenScheduler(num_steps=num_inference_steps)
         samples = scheduler(latents, func, model_kwargs, use_kv_cache=use_kv_cache, offload_kv_cache=offload_kv_cache)
@@ -304,6 +352,6 @@ class OmniGenPipeline:
         for i, sample in enumerate(output_samples):  
             output_images.append(Image.fromarray(sample))
         
-        torch.cuda.empty_cache()  # Clear VRAM
-        gc.collect()              # Run garbage collection to free system RAM
+        torch.cuda.empty_cache()
+        gc.collect()
         return output_images
