@@ -1,9 +1,20 @@
 # OmniGen-ComfyUI
-a custom node for [OmniGen](https://github.com/VectorSpaceLab/OmniGen), you can find [workflow here](./doc/)
-btw,PromptTextNode in ［UtilNodes-ComfyUI］(https://github.com/AIFSH/UtilNodes-ComfyUI)
 
-## EXample
-in prompt text, you only need `image_1`, text will auto be `<img><|image_1|></img>`
+A custom node for [OmniGen](https://github.com/VectorSpaceLab/OmniGen), you can find [workflow here](./doc/)
+
+Automatic downloading of the model is no longer performed, since now you have a loader node which will allow for finetunes, merges, as well as fp8 dtypes.
+
+## How to Install
+
+1. Create an OmniGen folder the models directory in /ComfyUI/models/Omnigen (this has moved from the older folder location)
+2. Within the /ComfyUI/models/Omnigen download all of the files from https://huggingface.co/Shitao/OmniGen-v1 into its own folder.
+
+You can also download the models with GIT. First do **GIT LFS** and afterwards do **git clone https://huggingface.co/Shitao/OmniGen-v1**. This can take awhile, and may appear as if it is doing nothing for a bit.
+
+3. Install **OmniGen-ComfyUI** by **AIFSH** in Comfy Manager. Be sure to select the correct one. Many clones with less functionality have appeared since.
+
+## Example
+In the prompt text, you only need to use `image_1` (for image 1), instead of needing to use `<img><|image_1|></img>`.
 |text|image_1|image_2|image_3|out_img|
 |--|--|--|--|--|
 |`A curly-haired man in a red shirt is drinking tea.`|--|--|--|![](./doc/ComfyUI_temp_mdplu_00001_.png)|
@@ -13,9 +24,9 @@ in prompt text, you only need `image_1`, text will auto be `<img><|image_1|></im
 For out of memory or time cost, you can refer to [inference.md#requiremented-resources](https://github.com/VectorSpaceLab/OmniGen/blob/main/docs/inference.md#requiremented-resources) to select a appropriate setting.
 
 ```
-{"task_type":"text_to_iamge","instruction":"A white cat resting on a picnic table.","input_images":[],"output_image":"cat.png"}
-{"task_type":"image_edit","instruction":"<img><|image_1|></img> The umbrella should be red.","input_images":["edit_source_1.png"],"output_image":"edit_target_1.png"}
-{"task_type":"segementation","instruction":"Find lamp in the picture <img><|image_1|></img> and color them blue.","input_images":["seg_input.png"],"output_image":"seg_output.png"}
-{"task_type":"try-on","instruction":"<img><|image_1|></img> wears <img><|image_2|></img>.","input_images":["model.png","clothes.png"],"output_image":"try_on.png"}
-{"task_type":"pose", "instruction": "Detect the skeleton of human in <img><|image_1|></img>", "input_images": ["human_pose.png"], "output_image": "pose.png"}
+text2img Example Prompt: "A white cat resting on a picnic table."
+Image Editing Example Prompt: "image_1 The umbrella should be red."
+Segmentation Example Prompt: "Find lamp in the picture image_1 and color them blue."
+Try-On Example Prompt:"image_1 wears image_2."
+Pose Example Prompt: "Detect the skeleton of human in image_1."
 ```
