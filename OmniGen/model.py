@@ -300,8 +300,11 @@ class OmniGen(nn.Module, PeftAdapterMixin):
                     latent = self.input_x_embedder(latent)
                 else:
                     latent = self.x_embedder(latent)
-                pos_embed = self.cropped_pos_embed(height, width)    
+                
+                # Get position embeddings for the original dimensions
+                pos_embed = self.cropped_pos_embed(height, width)
                 latent = latent + pos_embed
+                
                 if padding is not None:
                     latent = torch.cat([latent, padding], dim=-2)
                 patched_latents.append(latent)
@@ -318,7 +321,7 @@ class OmniGen(nn.Module, PeftAdapterMixin):
                 latents = self.input_x_embedder(latents)
             else:
                 latents = self.x_embedder(latents)
-            pos_embed = self.cropped_pos_embed(height, width)  
+            pos_embed = self.cropped_pos_embed(height, width)
             latents = latents + pos_embed
             num_tokens = latents.size(1)
             shapes = [height, width]
@@ -327,14 +330,15 @@ class OmniGen(nn.Module, PeftAdapterMixin):
     
     def forward(self, x, timestep, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, padding_latent=None, past_key_values=None, return_past_key_values=True, offload_model:bool=False):
         """
-        
+        Forward pass with proper dimension handling
         """
         input_is_list = isinstance(x, list)
         x, num_tokens, shapes = self.patch_multiple_resolutions(x, padding_latent)
-        time_token = self.time_token(timestep, dtype=x[0].dtype).unsqueeze(1)   
+        time_token = self.time_token(timestep, dtype=x[0].dtype if input_is_list else x.dtype).unsqueeze(1)   
         
         if input_img_latents is not None:
             input_latents, _, _ = self.patch_multiple_resolutions(input_img_latents, is_input_images=True)
+            
         if input_ids is not None:
             condition_embeds = self.llm.embed_tokens(input_ids).clone()
             input_img_inx = 0
@@ -343,16 +347,25 @@ class OmniGen(nn.Module, PeftAdapterMixin):
                     condition_embeds[b_inx, start_inx: end_inx] = input_latents[input_img_inx]
                     input_img_inx += 1
             if input_img_latents is not None:
-                assert input_img_inx == len(input_latents) 
+                assert input_img_inx == len(input_latents)
 
             input_emb = torch.cat([condition_embeds, time_token, x], dim=1)
         else:
             input_emb = torch.cat([time_token, x], dim=1)
-        output = self.llm(inputs_embeds=input_emb, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model)
+
+        output = self.llm(
+            inputs_embeds=input_emb,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            offload_model=offload_model
+        )
+        
         output, past_key_values = output.last_hidden_state, output.past_key_values
+
         if input_is_list:
             image_embedding = output[:, -max(num_tokens):]
-            time_emb = self.t_embedder(timestep, dtype=x.dtype)
+            time_emb = self.t_embedder(timestep, dtype=x[0].dtype)
             x = self.final_layer(image_embedding, time_emb)
             latents = []
             for i in range(x.size(0)):

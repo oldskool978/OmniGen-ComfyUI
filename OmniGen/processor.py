@@ -20,14 +20,20 @@ from OmniGen.utils import (
 )
 
 
-
+def pad_to_multiple_of_16(dimension: int) -> int:
+    if dimension % 16 == 0:
+        return dimension
+    return ((dimension // 16) + 1) * 16
 
 class OmniGenProcessor:
-    def __init__(self, 
-                text_tokenizer, 
-                max_image_size: int=1024):
+    def __init__(self, text_tokenizer, max_image_size: int=1024):
         self.text_tokenizer = text_tokenizer
         self.max_image_size = max_image_size
+        self.collator = OmniGenCollator()
+        self.separate_collator = OmniGenSeparateCollator()
+        
+        # Add pad_to_multiple_of_16 as an instance method
+        self.pad_to_multiple_of_16 = pad_to_multiple_of_16
 
         self.image_transform = transforms.Compose([
             transforms.Lambda(lambda pil_image: crop_arr(pil_image, max_image_size)),
@@ -110,26 +116,32 @@ class OmniGenProcessor:
                 separate_cfg_input: bool = False,
                 use_input_image_size_as_output: bool=False,
                 ) -> Dict:
-
+                
         if input_images is None:
             use_img_cfg = False
         if isinstance(instructions, str):
             instructions = [instructions]
             input_images = [input_images]
-        
+
         input_data = []
         for i in range(len(instructions)):
             cur_instruction = instructions[i]
             cur_input_images = None if input_images is None else input_images[i]
             if cur_input_images is not None and len(cur_input_images) > 0:
+                # Get dimensions from first input image if using input size as output
+                if use_input_image_size_as_output and i == 0:
+                    with Image.open(cur_input_images[0]) as img:
+                        orig_width, orig_height = img.size
+                        height = pad_to_multiple_of_16(orig_height)
+                        width = pad_to_multiple_of_16(orig_width)
+                
                 cur_input_images = [self.process_image(x) for x in cur_input_images]
             else:
                 cur_input_images = None
                 assert "<img><|image_1|></img>" not in cur_instruction
             
             mllm_input = self.process_multi_modal_prompt(cur_instruction, cur_input_images)
-
-        
+            
             neg_mllm_input, img_cfg_mllm_input = None, None
             neg_mllm_input = self.process_multi_modal_prompt(negative_prompt, None)
             if use_img_cfg:
@@ -139,10 +151,7 @@ class OmniGenProcessor:
                 else:
                     img_cfg_mllm_input = neg_mllm_input
 
-            if use_input_image_size_as_output:
-                input_data.append((mllm_input, neg_mllm_input, img_cfg_mllm_input, [mllm_input['pixel_values'][0].size(-2), mllm_input['pixel_values'][0].size(-1)]))
-            else:
-                input_data.append((mllm_input, neg_mllm_input, img_cfg_mllm_input, [height, width]))
+            input_data.append((mllm_input, neg_mllm_input, img_cfg_mllm_input, [height, width]))
 
         if separate_cfg_input:
             return self.separate_collator(input_data)
@@ -155,35 +164,39 @@ class OmniGenCollator:
     def __init__(self, pad_token_id=2, hidden_size=3072):
         self.pad_token_id = pad_token_id
         self.hidden_size = hidden_size
-    
+
     def create_position(self, attention_mask, num_tokens_for_output_images):
         position_ids = []
         text_length = attention_mask.size(-1)
-        img_length = max(num_tokens_for_output_images)  
+        img_length = max(num_tokens_for_output_images)
         for mask in attention_mask:
             temp_l = torch.sum(mask)
-            temp_position = [0]*(text_length-temp_l) + [i for i in range(temp_l+img_length+1)] # we add a time embedding into the sequence, so add one more token
+            # Add padded positions
+            temp_position = [0] * (text_length - temp_l) + list(range(temp_l + img_length + 1))
             position_ids.append(temp_position)
         return torch.LongTensor(position_ids)
-    
+
     def create_mask(self, attention_mask, num_tokens_for_output_images):
         extended_mask = []
         padding_images = []
         text_length = attention_mask.size(-1)
         img_length = max(num_tokens_for_output_images)
-        seq_len = text_length + img_length + 1 # we add a time embedding into the sequence, so add one more token
-        inx = 0
-        for mask in attention_mask:
+        seq_len = text_length + img_length + 1  # +1 for time embedding
+        
+        for idx, mask in enumerate(attention_mask):
             temp_l = torch.sum(mask)
             pad_l = text_length - temp_l
 
+            # Create base attention mask
             temp_mask = torch.tril(torch.ones(size=(temp_l+1, temp_l+1)))
 
-            image_mask = torch.zeros(size=(temp_l+1, img_length))
-            temp_mask = torch.cat([temp_mask, image_mask], dim=-1)
+            # Add padding for image tokens
+            img_mask = torch.zeros(size=(temp_l+1, img_length))
+            temp_mask = torch.cat([temp_mask, img_mask], dim=-1)
 
-            image_mask = torch.ones(size=(img_length, temp_l+img_length+1))
-            temp_mask = torch.cat([temp_mask, image_mask], dim=0)
+            # Add full attention for image tokens
+            img_mask = torch.ones(size=(img_length, temp_l+img_length+1))
+            temp_mask = torch.cat([temp_mask, img_mask], dim=0)
 
             if pad_l > 0:
                 pad_mask = torch.zeros(size=(temp_l+1+img_length, pad_l))
@@ -192,17 +205,18 @@ class OmniGenCollator:
                 pad_mask = torch.ones(size=(pad_l, seq_len))
                 temp_mask = torch.cat([pad_mask, temp_mask], dim=0)
 
-            true_img_length = num_tokens_for_output_images[inx]
+            # Handle padding for varying image sizes
+            true_img_length = num_tokens_for_output_images[idx]
             pad_img_length = img_length - true_img_length
             if pad_img_length > 0:
                 temp_mask[:, -pad_img_length:] = 0
                 temp_padding_imgs = torch.zeros(size=(1, pad_img_length, self.hidden_size))
             else:
                 temp_padding_imgs = None
-            
+
             extended_mask.append(temp_mask.unsqueeze(0))
             padding_images.append(temp_padding_imgs)
-            inx += 1
+
         return torch.cat(extended_mask, dim=0), padding_images
     
     def adjust_attention_for_input_images(self, attention_mask, image_sizes):
@@ -241,7 +255,11 @@ class OmniGenCollator:
     def process_mllm_input(self, mllm_inputs, target_img_size):
         num_tokens_for_output_images = []
         for img_size in target_img_size:
-            num_tokens_for_output_images.append(img_size[0]*img_size[1]//16//16)
+            # Calculate tokens using padded dimensions
+            h = pad_to_multiple_of_16(img_size[0])
+            w = pad_to_multiple_of_16(img_size[1])
+            num_tokens = (h * w) // (16 * 16)  # Convert padded pixels to tokens
+            num_tokens_for_output_images.append(num_tokens)
 
         pixel_values, image_sizes = [], {}
         b_inx = 0
@@ -256,7 +274,6 @@ class OmniGenCollator:
             b_inx += 1     
         pixel_values = [x.unsqueeze(0) for x in pixel_values]
 
-        
         input_ids = [x['input_ids'] for x in mllm_inputs]
         padded_input_ids, attention_mask, image_sizes = self.pad_input_ids(input_ids, image_sizes)
         position_ids = self.create_position(attention_mask, num_tokens_for_output_images)
