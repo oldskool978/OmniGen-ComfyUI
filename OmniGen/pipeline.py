@@ -220,16 +220,22 @@ class OmniGenPipeline:
             prompt = [prompt]
             input_images = [input_images] if input_images is not None else None
             
-        # Handle use_input_image_size_as_output
-        if use_input_image_size_as_output:
-            assert isinstance(prompt, str) or len(prompt) == 1, "Can only use one prompt when matching input image size"
-            assert input_images is not None and len(input_images[0]) >= 1, "Need at least one input image to match size"
-            
+        # Determine if we should use input image dimensions
+        should_use_input_size = (
+            use_input_image_size_as_output and 
+            input_images is not None and 
+            len(input_images) > 0 and 
+            len(input_images[0]) >= 1
+        )
+        
+        # Handle dimensions
+        if should_use_input_size:
             # Get dimensions from the first input image
-            orig_height, orig_width = get_image_dimensions(input_images[0][0])
-            height = pad_to_multiple_of_16(orig_height)
-            width = pad_to_multiple_of_16(orig_width)
-            
+            with Image.open(input_images[0][0]) as img:
+                orig_width, orig_height = img.size
+                height = pad_to_multiple_of_16(orig_height)
+                width = pad_to_multiple_of_16(orig_width)
+                
             if height != orig_height or width != orig_width:
                 logger.info(f"Input image dimensions ({orig_height}, {orig_width}) padded to ({height}, {width}) to ensure multiples of 16")
         else:
@@ -260,7 +266,7 @@ class OmniGenPipeline:
             width=width, 
             use_img_cfg=use_img_guidance, 
             separate_cfg_input=separate_cfg_infer, 
-            use_input_image_size_as_output=use_input_image_size_as_output
+            use_input_image_size_as_output=should_use_input_size
         )
 
         num_prompt = len(prompt)
