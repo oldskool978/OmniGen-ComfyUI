@@ -57,8 +57,19 @@ class OmniGenProcessor:
 
 
     def process_image(self, image):
-        image = Image.open(image).convert('RGB')
-        return self.image_transform(image)
+        """
+        Open and process an image, stripping EXIF data first.
+        """
+        # Open original image
+        image = Image.open(image)
+        
+        # Create a new image without EXIF data by copying the pixel data
+        image_without_exif = Image.new(image.mode, image.size)
+        image_without_exif.putdata(list(image.getdata()))
+        
+        # Convert to RGB and apply existing transforms
+        image_without_exif = image_without_exif.convert('RGB')
+        return self.image_transform(image_without_exif)
     
     def process_multi_modal_prompt(self, text, input_images):
         text = self.add_prefix_instruction(text)
