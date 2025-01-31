@@ -1,3 +1,4 @@
+transformers==4.45.2
 datasets
 accelerate
 pillow
