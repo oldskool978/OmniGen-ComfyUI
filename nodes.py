@@ -2,6 +2,7 @@ import os
 import torch
 import tempfile
 import shutil
+import gc
 import numpy as np
 from PIL import Image
 from OmniGen import OmniGenPipeline
